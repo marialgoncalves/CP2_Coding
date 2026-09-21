@@ -1,0 +1,26 @@
+```yaml
+services:
+
+  mysql-lab:
+    image: mysql:8.0
+    container_name: mysql-lab
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: security_lab
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  mongo-lab:
+    image: mongo:7
+    container_name: mongo-lab
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mysql_data:
+  mongo_data:
+```
