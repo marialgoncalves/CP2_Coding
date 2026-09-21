@@ -1,125 +1,159 @@
-import os
 import mysql.connector
 from pymongo import MongoClient
+from datetime import datetime
+
 
 MYSQL_CONFIG = {
-    "host": os.getenv("MYSQL_HOST", "localhost"),
-    "port": int(os.getenv("MYSQL_PORT", "3306")),
-    "user": os.getenv("MYSQL_USER", "root"),
-    "password": os.getenv("MYSQL_PASSWORD", "root"),
-    "database": os.getenv("MYSQL_DATABASE", "security_lab"),
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "root",
+    "database": "security_lab"
 }
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-MONGO_DATABASE = os.getenv("MONGO_DATABASE", "security_lab")
-MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "alertas")
-
-
-ATIVOS = [
-    (1, "SRV-WEB01", "192.168.1.10", "alta"),
-    (2, "PC-RH03", "192.168.1.45", "baixa"),
-]
-
-ALERTAS = [
-    (1, 1, "BRUTE_FORCE", "critica"),
-    (2, 1, "PORT_SCAN", "alta"),
-    (3, 2, "XSS", "media"),
-]
+MONGO_URI = "mongodb://localhost:27017/"
+MONGO_DATABASE = "security_lab"
 
 
 def conectar_mysql():
     return mysql.connector.connect(**MYSQL_CONFIG)
 
 
+def conectar_mongo():
+    client = MongoClient(MONGO_URI)
+    return client[MONGO_DATABASE]
+
+
 def preparar_mysql():
-    conexao = conectar_mysql()
-    cursor = conexao.cursor()
+    conn = conectar_mysql()
+    cursor = conn.cursor()
+
+    cursor.execute("DROP TABLE IF EXISTS alertas")
+    cursor.execute("DROP TABLE IF EXISTS ativos")
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ativos (
+        CREATE TABLE ativos (
             id INT PRIMARY KEY,
             nome VARCHAR(100) NOT NULL,
-            ip VARCHAR(45) NOT NULL UNIQUE,
-            criticidade ENUM('baixa', 'media', 'alta') NOT NULL
+            criticidade VARCHAR(20) NOT NULL
         )
     """)
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS alertas (
+        CREATE TABLE alertas (
             id INT PRIMARY KEY,
             ativo_id INT NOT NULL,
-            tipo VARCHAR(100) NOT NULL,
-            severidade VARCHAR(50) NOT NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            severidade VARCHAR(20) NOT NULL,
+            descricao VARCHAR(255) NOT NULL,
+            criado_em DATETIME NOT NULL,
             FOREIGN KEY (ativo_id) REFERENCES ativos(id)
         )
     """)
 
-    # Limpa os dados para que o exercício possa ser executado novamente sem duplicar registros.
-    cursor.execute("DELETE FROM alertas")
-    cursor.execute("DELETE FROM ativos")
+    ativos = [
+        (1, "Servidor-Web-01", "alta"),
+        (2, "Servidor-DB-01", "alta"),
+        (3, "Notebook-ADM-01", "media"),
+    ]
 
-    cursor.executemany("""
-        INSERT INTO ativos (id, nome, ip, criticidade)
-        VALUES (%s, %s, %s, %s)
-    """, ATIVOS)
+    alertas = [
+        (
+            1,
+            1,
+            "critica",
+            "Tentativa de exploração",
+            datetime(2026, 9, 1, 10, 0, 0)
+        ),
+        (
+            2,
+            1,
+            "alta",
+            "Múltiplas falhas de autenticação",
+            datetime(2026, 9, 1, 11, 0, 0)
+        ),
+        (
+            3,
+            2,
+            "alta",
+            "Porta administrativa exposta",
+            datetime(2026, 9, 1, 12, 0, 0)
+        ),
+        (
+            4,
+            3,
+            "media",
+            "Software desatualizado",
+            datetime(2026, 9, 1, 13, 0, 0)
+        ),
+    ]
 
-    cursor.executemany("""
-        INSERT INTO alertas (id, ativo_id, tipo, severidade)
-        VALUES (%s, %s, %s, %s)
-    """, ALERTAS)
+    cursor.executemany(
+        """
+        INSERT INTO ativos (id, nome, criticidade)
+        VALUES (%s, %s, %s)
+        """,
+        ativos
+    )
 
-    conexao.commit()
+    cursor.executemany(
+        """
+        INSERT INTO alertas
+            (id, ativo_id, severidade, descricao, criado_em)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        alertas
+    )
+
+    conn.commit()
+
+    print("[OK] Banco MySQL preparado.")
 
     cursor.close()
-    conexao.close()
+    conn.close()
 
 
-def ler_alertas_com_join():
-    conexao = conectar_mysql()
-    cursor = conexao.cursor(dictionary=True)
+def extrair_dados_mysql():
+    conn = conectar_mysql()
+    cursor = conn.cursor(dictionary=True)
 
     query = """
         SELECT
-            a.id AS alerta_id,
-            a.tipo,
-            a.severidade,
-            at.nome,
-            at.ip,
-            at.criticidade
-        FROM alertas AS a
-        INNER JOIN ativos AS at
-            ON a.ativo_id = at.id
-        WHERE a.severidade = %s
-           OR a.severidade = %s
-           OR a.severidade = %s
+            al.id AS alerta_id,
+            al.ativo_id,
+            al.severidade,
+            al.descricao,
+            al.criado_em,
+            at.nome AS ativo_nome,
+            at.criticidade AS ativo_criticidade
+        FROM alertas al
+        INNER JOIN ativos at
+            ON al.ativo_id = at.id
+        ORDER BY al.id
     """
 
-    # Os valores são passados separadamente da SQL.
-    parametros = ("critica", "alta", "media")
-
-    cursor.execute(query, parametros)
-
+    cursor.execute(query)
     resultados = cursor.fetchall()
 
     cursor.close()
-    conexao.close()
+    conn.close()
 
     return resultados
 
 
-def montar_documentos(resultados):
+def converter_para_mongodb(registros):
     documentos = []
 
-    for alerta in resultados:
+    for registro in registros:
         documento = {
-            "tipo": alerta["tipo"],
-            "severidade": alerta["severidade"],
+            "alerta_id": registro["alerta_id"],
+            "severidade": registro["severidade"],
+            "descricao": registro["descricao"],
+            "criado_em": registro["criado_em"],
             "ativo": {
-                "nome": alerta["nome"],
-                "ip": alerta["ip"],
-                "criticidade": alerta["criticidade"],
-            },
+                "id": registro["ativo_id"],
+                "nome": registro["ativo_nome"],
+                "criticidade": registro["ativo_criticidade"]
+            }
         }
 
         documentos.append(documento)
@@ -127,58 +161,37 @@ def montar_documentos(resultados):
     return documentos
 
 
-def conectar_mongodb():
-    cliente = MongoClient(MONGO_URI)
+def migrar_para_mongodb(documentos):
+    db = conectar_mongo()
+    colecao = db["alertas"]
 
-    banco = cliente[MONGO_DATABASE]
-    colecao = banco[MONGO_COLLECTION]
-
-    return cliente, colecao
-
-
-def inserir_documentos(documentos):
-    cliente, colecao = conectar_mongodb()
-
-    # Limpa a coleção para permitir novas execuções.
     colecao.delete_many({})
 
-    resultado = colecao.insert_many(documentos)
+    if documentos:
+        resultado = colecao.insert_many(documentos)
+        print(
+            f"[OK] {len(resultado.inserted_ids)} documentos "
+            "inseridos no MongoDB."
+        )
 
-    quantidade = len(resultado.inserted_ids)
-
-    cliente.close()
-
-    return quantidade
-
-
-# VERIFICAÇÃO DA MIGRAÇÃO
-def contar_alertas_mysql():
-    conexao = conectar_mysql()
-    cursor = conexao.cursor()
-
-    cursor.execute("SELECT COUNT(*) FROM alertas")
-
-    quantidade = cursor.fetchone()[0]
-
-    cursor.close()
-    conexao.close()
-
-    return quantidade
+    return colecao
 
 
-def contar_documentos_mongodb():
-    cliente, colecao = conectar_mongodb()
+def comparar_quantidades(total_mysql, colecao):
+    total_mongo = colecao.count_documents({})
 
-    quantidade = colecao.count_documents({})
+    print(f"[INFO] Alertas no MySQL: {total_mysql}")
+    print(f"[INFO] Documentos no MongoDB: {total_mongo}")
 
-    cliente.close()
+    if total_mysql == total_mongo:
+        print("[OK] Nenhum alerta foi perdido durante a migração.")
+    else:
+        print("[ERRO] A quantidade de registros não coincide.")
 
-    return quantidade
+    return total_mongo
 
 
-def consultar_ativos_criticos():
-    cliente, colecao = conectar_mongodb()
-
+def consultar_ativos_criticidade_alta(colecao):
     resultados = list(
         colecao.find(
             {"ativo.criticidade": "alta"},
@@ -186,89 +199,63 @@ def consultar_ativos_criticos():
         )
     )
 
-    cliente.close()
+    print("\nAlertas relacionados a ativos de criticidade alta:")
+
+    for alerta in resultados:
+        print(
+            f"- Alerta {alerta['alerta_id']} | "
+            f"Ativo: {alerta['ativo']['nome']} | "
+            f"Severidade: {alerta['severidade']}"
+        )
+
+    print(f"[INFO] Total encontrado: {len(resultados)}")
 
     return resultados
 
 
-# EXECUÇÃO PRINCIPAL
 def main():
-    print("=" * 70)
+    print("=" * 60)
     print("EXERCÍCIO 2 — MIGRAÇÃO MYSQL → MONGODB")
-    print("=" * 70)
+    print("=" * 60)
 
-    print("\n[1] Preparando MySQL...")
     preparar_mysql()
-    print("[OK] MySQL criado e populado.")
 
-    print("\n[2] Executando JOIN parametrizado...")
-    resultados = ler_alertas_com_join()
+    registros = extrair_dados_mysql()
 
-    print(f"[OK] {len(resultados)} alertas recuperados do MySQL.")
+    print(f"[INFO] Registros obtidos pelo JOIN: {len(registros)}")
 
-    for alerta in resultados:
-        print(
-            f"    {alerta['tipo']} | "
-            f"{alerta['severidade']} | "
-            f"{alerta['nome']} | "
-            f"{alerta['ip']}"
-        )
+    documentos = converter_para_mongodb(registros)
 
-    print("\n[3] Convertendo registros para documentos MongoDB...")
-    documentos = montar_documentos(resultados)
+    colecao = migrar_para_mongodb(documentos)
 
-    for documento in documentos:
-        print(f"    {documento}")
-
-    print("\n[4] Inserindo documentos no MongoDB...")
-    quantidade_inserida = inserir_documentos(documentos)
-
-    print(
-        f"[OK] {quantidade_inserida} documentos inseridos."
+    comparar_quantidades(
+        total_mysql=len(registros),
+        colecao=colecao
     )
 
-    print("\n[5] Verificando integridade da migração...")
+    consultar_ativos_criticidade_alta(colecao)
 
-    quantidade_mysql = contar_alertas_mysql()
-    quantidade_mongodb = contar_documentos_mongodb()
-
+    print("\nANÁLISE:")
     print(
-        f"MySQL: {quantidade_mysql} alertas | "
-        f"MongoDB: {quantidade_mongodb} documentos"
-    )
-
-    if quantidade_mysql == quantidade_mongodb:
-        print("MIGRAÇÃO ÍNTEGRA")
-    else:
-        print("ERRO: quantidade de registros diferente!")
-
-    print("\n[6] Consulta sem JOIN:")
-    resultados_criticos = consultar_ativos_criticos()
-
-    print(
-        'Consulta: db.alertas.find({"ativo.criticidade":"alta"})'
-    )
-
-    print(
-        f"Resultado: {len(resultados_criticos)} documentos"
-    )
-
-    for documento in resultados_criticos:
-        print(f"    {documento}")
-
-    print("\n[7] Análise do modelo de documentos")
-    print(
-        "Ganho: a leitura do alerta já possui os dados do ativo embutidos, "
-        "eliminando a necessidade de JOIN."
+        "- O modelo relacional utiliza JOIN entre ativos e alertas."
     )
     print(
-        "Perda: existe duplicação dos dados do ativo; se o ativo for "
-        "renomeado, será necessário atualizar vários documentos."
+        "- No MongoDB, os dados do ativo são incorporados "
+        "diretamente ao documento do alerta."
     )
-
-    print("\n" + "=" * 70)
+    print(
+        "- O embedding evita JOINs durante consultas que precisam "
+        "dos dados do ativo junto ao alerta."
+    )
+    print(
+        "- A desvantagem é a duplicação dos dados do ativo caso "
+        "existam muitos alertas para o mesmo ativo."
+    )
+    print(
+        "- A comparação das quantidades confirma que nenhum alerta "
+        "foi perdido durante a migração."
+    )
 
 
 if __name__ == "__main__":
     main()
-

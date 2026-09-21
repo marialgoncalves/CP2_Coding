@@ -1,9 +1,8 @@
-```yaml
 services:
-
   mysql-lab:
     image: mysql:8.0
     container_name: mysql-lab
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: security_lab
@@ -15,6 +14,7 @@ services:
   mongo-lab:
     image: mongo:7
     container_name: mongo-lab
+    restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
@@ -23,4 +23,3 @@ services:
 volumes:
   mysql_data:
   mongo_data:
-```

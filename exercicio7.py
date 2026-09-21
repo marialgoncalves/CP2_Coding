@@ -1,48 +1,22 @@
-import os
 from flask import Flask, render_template_string, make_response
-from pymongo import MongoClient
+from markupsafe import escape
+
 
 app = Flask(__name__)
 
-MONGO_URI = os.getenv(
-    "MONGO_URI",
-    "mongodb://localhost:27017/"
-)
 
-MONGO_DATABASE = os.getenv(
-    "MONGO_DATABASE",
-    "security_lab"
-)
-
-
-P1 = "<script>alert('xss1')</script>"
-P2 = 'x" onerror="alert(\'xss2\')'
-
-
-def conectar_mongodb():
-    cliente = MongoClient(MONGO_URI)
-    banco = cliente[MONGO_DATABASE]
-
-    return cliente, banco["incidentes_xss"]
-
-
-def preparar_dados():
-    cliente, colecao = conectar_mongodb()
-
-    colecao.delete_many({})
-
-    colecao.insert_many([
-        {
-            "titulo": P1,
-            "ativo": P1
-        },
-        {
-            "titulo": P2,
-            "ativo": P2
-        }
-    ])
-
-    cliente.close()
+EVENTOS = [
+    {
+        "id": 1,
+        "ativo": "<script>alert('xss1')</script>",
+        "descricao": "Tentativa de XSS armazenado"
+    },
+    {
+        "id": 2,
+        "ativo": 'x" onerror="alert(\'xss2\')',
+        "descricao": "Tentativa de quebra de atributo HTML"
+    }
+]
 
 
 TEMPLATE_SEGURO = """
@@ -50,48 +24,34 @@ TEMPLATE_SEGURO = """
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Dashboard de Incidentes</title>
+    <title>Dashboard Seguro</title>
 </head>
 <body>
+    <h1>Dashboard de Segurança</h1>
 
-<h1>Dashboard de Incidentes — Seguro</h1>
-
-<table border="1">
-    <thead>
+    <table border="1">
         <tr>
             <th>ID</th>
-            <th>Título</th>
             <th>Ativo</th>
+            <th>Descrição</th>
         </tr>
-    </thead>
 
-    <tbody>
-        {% for incidente in incidentes %}
+        {% for evento in eventos %}
         <tr>
-            <td>{{ incidente._id }}</td>
-
+            <td>{{ evento.id }}</td>
             <td>
-                {{ incidente.titulo }}
-            </td>
-
-            <td>
+                {{ evento.ativo }}
                 <img
                     src="/icone.png"
-                    alt="{{ incidente.ativo }}"
+                    alt="{{ evento.ativo }}"
+                    width="1"
+                    height="1"
                 >
-                {{ incidente.ativo }}
             </td>
+            <td>{{ evento.descricao }}</td>
         </tr>
         {% endfor %}
-    </tbody>
-</table>
-
-<p>
-    Jinja2 faz escape automático do conteúdo inserido no HTML;
-    usar <code>|safe</code> indevidamente desativaria esse escape e
-    poderia permitir a execução de JavaScript fornecido pelo usuário.
-</p>
-
+    </table>
 </body>
 </html>
 """
@@ -105,105 +65,145 @@ TEMPLATE_INSEGURO = """
     <title>Dashboard Inseguro</title>
 </head>
 <body>
+    <h1>Dashboard Inseguro — comparação</h1>
 
-<h1>⚠️ DASHBOARD INSEGURO — APENAS PARA COMPARAÇÃO</h1>
-
-<table border="1">
-    <thead>
+    <table border="1">
         <tr>
             <th>ID</th>
-            <th>Título</th>
             <th>Ativo</th>
+            <th>Descrição</th>
         </tr>
-    </thead>
 
-    <tbody>
-        {% for incidente in incidentes %}
+        {% for evento in eventos %}
         <tr>
-            <td>{{ incidente._id }}</td>
-
+            <td>{{ evento.id }}</td>
             <td>
-                {{ incidente.titulo | safe }}
-            </td>
-
-            <td>
+                {{ evento.ativo|safe }}
                 <img
                     src="/icone.png"
-                    alt="{{ incidente.ativo | safe }}"
+                    alt="{{ evento.ativo|safe }}"
+                    width="1"
+                    height="1"
                 >
             </td>
+            <td>{{ evento.descricao }}</td>
         </tr>
         {% endfor %}
-    </tbody>
-</table>
-
+    </table>
 </body>
 </html>
 """
 
 
-def resposta_com_csp(conteudo):
-    resposta = make_response(conteudo)
+def resposta_com_csp(html):
+    resposta = make_response(html)
 
-    resposta.headers["Content-Security-Policy"] = (
-        "default-src 'self'"
-    )
+    resposta.headers[
+        "Content-Security-Policy"
+    ] = "default-src 'self'"
 
     return resposta
 
 
+@app.after_request
+def adicionar_headers(response):
+    response.headers[
+        "Content-Security-Policy"
+    ] = "default-src 'self'"
+
+    return response
+
+
 @app.route("/dashboard")
 def dashboard():
-    cliente, colecao = conectar_mongodb()
-
-    incidentes = list(
-        colecao.find({})
-    )
-
-    cliente.close()
-
-    conteudo = render_template_string(
+    return render_template_string(
         TEMPLATE_SEGURO,
-        incidentes=incidentes
+        eventos=EVENTOS
     )
-
-    return resposta_com_csp(conteudo)
 
 
 @app.route("/dashboard-inseguro")
 def dashboard_inseguro():
-    cliente, colecao = conectar_mongodb()
-
-    incidentes = list(
-        colecao.find({})
-    )
-
-    cliente.close()
-
-    conteudo = render_template_string(
+    return render_template_string(
         TEMPLATE_INSEGURO,
-        incidentes=incidentes
+        eventos=EVENTOS
     )
-
-    return resposta_com_csp(conteudo)
 
 
 @app.route("/icone.png")
 def icone():
-    resposta = make_response(
+    response = make_response(
         b"\x89PNG\r\n\x1a\n"
     )
 
-    resposta.headers["Content-Type"] = "image/png"
+    response.headers["Content-Type"] = "image/png"
 
-    return resposta_com_csp(resposta)
+    return response
+
+
+@app.route("/")
+def index():
+    return """
+    <h1>Laboratório de XSS</h1>
+
+    <ul>
+        <li>
+            <a href="/dashboard">
+                Dashboard seguro
+            </a>
+        </li>
+
+        <li>
+            <a href="/dashboard-inseguro">
+                Dashboard inseguro
+            </a>
+        </li>
+    </ul>
+    """
+
+
+def executar_testes():
+    with app.test_client() as client:
+
+        resposta = client.get("/dashboard")
+
+        conteudo = resposta.get_data(as_text=True)
+
+        print("=" * 60)
+        print("TESTE DO DASHBOARD SEGURO")
+        print("=" * 60)
+
+        print("Status:", resposta.status_code)
+
+        print(
+            "CSP:",
+            resposta.headers.get("Content-Security-Policy")
+        )
+
+        print(
+            "Payload p1 literal:",
+            "&lt;script&gt;" in conteudo
+        )
+
+        print(
+            "Payload p2 escapado:",
+            "onerror=" not in conteudo
+            or "&#34;" in conteudo
+        )
+
+        assert resposta.status_code == 200
+        assert (
+            resposta.headers.get(
+                "Content-Security-Policy"
+            ) == "default-src 'self'"
+        )
 
 
 if __name__ == "__main__":
-    preparar_dados()
+    executar_testes()
 
     app.run(
-        host="0.0.0.0",
-        port=5000,
+        host="127.0.0.1",
+        port=5007,
         debug=False
     )

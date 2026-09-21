@@ -1,77 +1,77 @@
-import os
-from datetime import datetime, timezone
-from flask import Flask, jsonify, request, g
+from flask import Flask, request, jsonify
 from pymongo import MongoClient
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 from sklearn.ensemble import IsolationForest
+
 
 app = Flask(__name__)
 
-MONGO_URI = os.getenv(
-    "MONGO_URI",
-    "mongodb://localhost:27017/"
-)
 
-MONGO_DATABASE = os.getenv(
-    "MONGO_DATABASE",
-    "security_lab"
-)
+MONGO_URI = "mongodb://localhost:27017/"
+MONGO_DATABASE = "security_lab"
 
 
-def conectar_mongodb():
-    cliente = MongoClient(MONGO_URI)
-    banco = cliente[MONGO_DATABASE]
+def conectar_mongo():
+    client = MongoClient(MONGO_URI)
+    return client[MONGO_DATABASE]
 
-    return cliente, banco["acessos"]
+
+db = conectar_mongo()
+acessos = db["acessos"]
+
+
+def obter_ip():
+    """
+    X-Lab-IP existe apenas para permitir que o teste local
+    simule diferentes IPs.
+    """
+    return request.headers.get(
+        "X-Lab-IP",
+        request.remote_addr or "127.0.0.1"
+    )
 
 
 @app.before_request
 def registrar_inicio():
-    cliente, colecao = conectar_mongodb()
+    request.ip_cliente = obter_ip()
 
-    documento = {
-        "ip": request.remote_addr,
+    request.log_id = acessos.insert_one({
+        "ip": request.ip_cliente,
         "rota": request.path,
         "metodo": request.method,
         "timestamp": datetime.now(timezone.utc),
-    }
-
-    resultado = colecao.insert_one(documento)
-
-    cliente.close()
-
-    g.acesso_id = resultado.inserted_id
+        "status_code": None
+    }).inserted_id
 
 
 @app.after_request
-def registrar_status(resposta):
-    acesso_id = getattr(g, "acesso_id", None)
-
-    if acesso_id is not None:
-        cliente, colecao = conectar_mongodb()
-
-        colecao.update_one(
-            {"_id": acesso_id},
-            {
-                "$set": {
-                    "status_code": resposta.status_code
-                }
-            }
+def registrar_status(response):
+    if hasattr(request, "log_id"):
+        acessos.update_one(
+            {"_id": request.log_id},
+            {"$set": {"status_code": response.status_code}}
         )
 
-        cliente.close()
-
-    return resposta
+    return response
 
 
-# AGREGAÇÃO POR IP
-def extrair_features():
-    cliente, colecao = conectar_mongodb()
+def obter_features():
+    agora = datetime.now(timezone.utc)
+    inicio = agora - timedelta(minutes=1)
 
     pipeline = [
         {
+            "$match": {
+                "timestamp": {
+                    "$gte": inicio
+                }
+            }
+        },
+        {
             "$group": {
                 "_id": "$ip",
-                "total_requisicoes": {
+                "req_por_minuto": {
                     "$sum": 1
                 },
                 "total_4xx": {
@@ -98,7 +98,7 @@ def extrair_features():
                         ]
                     }
                 },
-                "rotas_distintas": {
+                "rotas": {
                     "$addToSet": "$rota"
                 }
             }
@@ -107,56 +107,45 @@ def extrair_features():
             "$project": {
                 "_id": 0,
                 "ip": "$_id",
-                "req_por_minuto": {
-                    "$divide": [
-                        "$total_requisicoes",
-                        1
-                    ]
-                },
+                "req_por_minuto": 1,
                 "taxa_4xx": {
                     "$cond": [
                         {
                             "$gt": [
-                                "$total_requisicoes",
+                                "$req_por_minuto",
                                 0
                             ]
                         },
                         {
                             "$divide": [
                                 "$total_4xx",
-                                "$total_requisicoes"
+                                "$req_por_minuto"
                             ]
                         },
                         0
                     ]
                 },
                 "rotas_distintas": {
-                    "$size": "$rotas_distintas"
+                    "$size": "$rotas"
                 }
             }
         }
     ]
 
-    resultados = list(
-        colecao.aggregate(pipeline)
-    )
-
-    cliente.close()
-
-    return resultados
+    return list(acessos.aggregate(pipeline))
 
 
-def analisar_anomalias():
-    dados = extrair_features()
+def detectar_anomalias():
+    dados = obter_features()
 
-    if len(dados) < 2:
-        return dados
+    if len(dados) < 5:
+        return set(), dados
 
     X = [
         [
             item["req_por_minuto"],
             item["taxa_4xx"],
-            item["rotas_distintas"],
+            item["rotas_distintas"]
         ]
         for item in dados
     ]
@@ -168,141 +157,196 @@ def analisar_anomalias():
 
     previsoes = modelo.fit_predict(X)
 
+    anormais = set()
+
     for item, previsao in zip(dados, previsoes):
-        item["anomalia"] = previsao == -1
+        if previsao == -1:
+            anormais.add(item["ip"])
 
-    return dados
+    return anormais, dados
 
 
-def ips_bloqueados():
-    dados = analisar_anomalias()
+def rate_limit_anomalia(funcao):
+    @wraps(funcao)
+    def wrapper(*args, **kwargs):
+        anormais, _ = detectar_anomalias()
 
-    bloqueados = {
-        item["ip"]
-        for item in dados
-        if item.get("anomalia", False)
-    }
+        if request.ip_cliente in anormais:
+            response = jsonify({
+                "erro": "IP identificado como comportamento anômalo"
+            })
 
-    return bloqueados
+            response.status_code = 429
+            response.headers["Retry-After"] = "60"
+
+            return response
+
+        return funcao(*args, **kwargs)
+
+    return wrapper
 
 
 @app.route("/")
-def home():
+@rate_limit_anomalia
+def index():
     return jsonify({
         "mensagem": "API funcionando"
-    }), 200
+    })
 
 
-@app.route("/api/saude")
-def saude():
+@app.route("/api/eventos")
+@rate_limit_anomalia
+def eventos():
+    return jsonify({
+        "eventos": [
+            {
+                "id": 1,
+                "tipo": "login"
+            },
+            {
+                "id": 2,
+                "tipo": "alerta"
+            }
+        ]
+    })
+
+
+@app.route("/api/status")
+@rate_limit_anomalia
+def status():
     return jsonify({
         "status": "ok"
-    }), 200
+    })
 
 
-@app.route("/api/dados")
-def dados():
-    return jsonify({
-        "dados": "acesso autorizado"
-    }), 200
+def limpar_dados():
+    acessos.delete_many({})
 
 
-@app.route("/api/analise")
-def analise():
-    return jsonify({
-        "resultado": "normal"
-    }), 200
+def simular_acessos(ip, quantidade, rota="/api/eventos"):
+    for _ in range(quantidade):
+        with app.test_client() as client:
+            client.get(
+                rota,
+                headers={
+                    "X-Lab-IP": ip
+                }
+            )
 
 
-@app.before_request
-def bloquear_anomalia():
-    # O registro da requisição acontece antes deste ponto
-    # e será completado pelo after_request.
+def mostrar_features():
+    _, dados = detectar_anomalias()
 
-    ip = request.remote_addr
-
-    # Evita tentar analisar enquanto ainda não existem dados
-    # suficientes para o IsolationForest.
-    dados = extrair_features()
-
-    if len(dados) < 2:
-        return None
-
-    X = [
-        [
-            item["req_por_minuto"],
-            item["taxa_4xx"],
-            item["rotas_distintas"],
-        ]
-        for item in dados
-    ]
-
-    modelo = IsolationForest(
-        contamination=0.2,
-        random_state=42
-    )
-
-    previsoes = modelo.fit_predict(X)
-
-    for item, previsao in zip(dados, previsoes):
-        if (
-            item["ip"] == ip
-            and previsao == -1
-        ):
-            resposta = jsonify({
-                "erro": "muitas requisições"
-            })
-
-            resposta.status_code = 429
-            resposta.headers["Retry-After"] = "60"
-
-            return resposta
-
-    return None
-
-
-# RELATÓRIO
-@app.route("/api/anomalias", methods=["GET"])
-def relatorio_anomalias():
-
-    dados = analisar_anomalias()
-
-    resultado = []
+    print("\nFEATURES DOS IPs:")
 
     for item in dados:
-        resultado.append({
-            "ip": item["ip"],
-            "req_por_minuto": item["req_por_minuto"],
-            "taxa_4xx": item["taxa_4xx"],
-            "rotas_distintas": item["rotas_distintas"],
-            "situacao": (
-                "ANOMALIA -> bloqueado"
-                if item.get("anomalia", False)
-                else "normal"
-            )
-        })
-
-    return jsonify({
-        "analise": resultado,
-        "comentario": (
-            "Bloquear por anomalia pode gerar falso positivo e "
-            "impedir o acesso de um usuário legítimo. "
-            "Por isso, o comportamento detectado deve ser analisado "
-            "com cuidado antes de aplicar bloqueios automáticos."
+        print(
+            f"IP: {item['ip']} | "
+            f"req/min: {item['req_por_minuto']} | "
+            f"taxa_4xx: {item['taxa_4xx']:.2f} | "
+            f"rotas distintas: {item['rotas_distintas']}"
         )
-    }), 200
+
+
+def executar_testes():
+    limpar_dados()
+
+    print("=" * 60)
+    print("EXERCÍCIO 9 — RATE LIMITING ADAPTATIVO")
+    print("=" * 60)
+
+    # IPs normais
+    simular_acessos(
+        "192.168.1.10",
+        5,
+        "/api/status"
+    )
+
+    simular_acessos(
+        "192.168.1.11",
+        5,
+        "/api/eventos"
+    )
+
+    simular_acessos(
+        "192.168.1.12",
+        4,
+        "/"
+    )
+
+    simular_acessos(
+        "192.168.1.13",
+        6,
+        "/api/status"
+    )
+
+    # IP hostil: muitas requisições e várias rotas
+    simular_acessos(
+        "185.220.101.1",
+        60,
+        "/api/eventos"
+    )
+
+    for rota in [
+        "/",
+        "/api/status",
+        "/api/eventos"
+    ]:
+        simular_acessos(
+            "185.220.101.1",
+            20,
+            rota
+        )
+
+    mostrar_features()
+
+    anormais, _ = detectar_anomalias()
+
+    print("\nIPs classificados como anômalos:")
+
+    for ip in anormais:
+        print("-", ip)
+
+    with app.test_client() as client:
+
+        resposta_normal = client.get(
+            "/api/status",
+            headers={
+                "X-Lab-IP": "192.168.1.10"
+            }
+        )
+
+        print(
+            "\nIP normal:",
+            resposta_normal.status_code
+        )
+
+        resposta_hostil = client.get(
+            "/api/status",
+            headers={
+                "X-Lab-IP": "185.220.101.1"
+            }
+        )
+
+        print(
+            "IP hostil:",
+            resposta_hostil.status_code
+        )
+
+        if resposta_hostil.status_code == 429:
+            print(
+                "Retry-After:",
+                resposta_hostil.headers.get(
+                    "Retry-After"
+                )
+            )
 
 
 if __name__ == "__main__":
-
-    cliente, colecao = conectar_mongodb()
-
-    colecao.delete_many({})
-
-    cliente.close()
+    executar_testes()
 
     app.run(
-        host="0.0.0.0",
-        port=5000,
+        host="127.0.0.1",
+        port=5009,
         debug=False
     )
