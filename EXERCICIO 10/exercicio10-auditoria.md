@@ -1,17 +1,17 @@
 # Auditoria de Segurança — Exercício 10
 
-1. **A03 — Injection:** a rota `/api/usuarios/buscar` concatenava diretamente a entrada do usuário na consulta SQL, permitindo SQL Injection. Correção: utilizar consultas parametrizadas com placeholders `%s`.
+1. **A05 — Injection:** a rota `/api/usuarios/buscar` concatenava diretamente a entrada do usuário na consulta SQL, permitindo SQL Injection e vazamento de registros. Correção: utilizar consultas SQL parametrizadas com placeholders `%s`.
 
-2. **A05 — Injection/XSS:** a rota `/perfil` retornava entrada controlada pelo usuário diretamente no HTML, permitindo XSS refletido. Correção: utilizar renderização Jinja2 com escape automático.
+2. **A05 — Injection:** a rota `/perfil` inseria diretamente entrada controlada pelo usuário no HTML, permitindo XSS refletido. Correção: utilizar renderização com Jinja2 e escape automático dos valores.
 
-3. **A01 — Broken Access Control:** a rota DELETE não possuía autenticação nem autorização, permitindo que qualquer pessoa removesse usuários. Correção: exigir credencial e nível de acesso adequado.
+3. **A01 — Broken Access Control:** a rota DELETE não possuía autenticação nem autorização, permitindo que qualquer usuário removesse registros. Correção: exigir autenticação e verificar o nível de autorização antes da operação.
 
-4. **A05 — Security Misconfiguration:** o modo `debug=True` poderia expor informações internas da aplicação e traceback. Correção: executar a aplicação com `debug=False` e retornar mensagens genéricas ao cliente.
+4. **A10 — Mishandling of Exceptional Conditions:** a aplicação executava com `debug=True`, podendo expor traceback e informações internas quando ocorria uma exceção. Correção: desabilitar o modo debug em produção e retornar uma mensagem genérica de erro ao cliente.
 
-5. **A04 — Cryptographic Failures:** a resposta da busca utilizava `SELECT *`, podendo expor a coluna `senha`. Correção: selecionar somente os campos necessários e nunca retornar credenciais.
+5. **A01 — Broken Access Control:** a consulta utilizava `SELECT *` e podia retornar a coluna `senha`, expondo informação sensível pela API. Correção: selecionar somente as colunas necessárias e nunca retornar credenciais na resposta.
 
-6. **A05 — Security Misconfiguration:** a aplicação não definia headers de segurança HTTP. Correção: adicionar `Content-Security-Policy`, `X-Content-Type-Options` e `X-Frame-Options`.
+6. **A02 — Security Misconfiguration:** a aplicação não configurava headers HTTP de segurança. Correção: adicionar `Content-Security-Policy`, `X-Content-Type-Options` e `X-Frame-Options`.
 
-7. **A07 — Identification and Authentication Failures:** a API não possuía mecanismo de autenticação para proteger operações administrativas. Correção: validar uma credencial antes de permitir operações sensíveis.
+7. **A07 — Authentication Failures:** a API não possuía mecanismo de autenticação para proteger operações administrativas. Correção: validar uma credencial antes de permitir operações sensíveis.
 
-8. **A02 — Cryptographic Failures:** a aplicação mantinha uma senha mestra diretamente no código-fonte (`SENHA_MESTRA`), expondo uma credencial caso o código fosse acessado. Correção: remover segredos do código e utilizar variáveis de ambiente ou um gerenciador de segredos.
+8. **A04 — Cryptographic Failures:** a aplicação possuía um segredo sensível (`SENHA_MESTRA`) diretamente no código-fonte. Correção: remover o segredo do código e utilizar variáveis de ambiente ou um gerenciador de segredos.

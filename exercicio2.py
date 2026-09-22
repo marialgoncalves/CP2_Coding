@@ -35,7 +35,8 @@ def preparar_mysql():
         CREATE TABLE ativos (
             id INT PRIMARY KEY,
             nome VARCHAR(100) NOT NULL,
-            criticidade VARCHAR(20) NOT NULL
+            ip VARCHAR(45) NOT NULL UNIQUE,
+            criticidade ENUM('baixa', 'media', 'alta') NOT NULL
         )
     """)
 
@@ -43,54 +44,58 @@ def preparar_mysql():
         CREATE TABLE alertas (
             id INT PRIMARY KEY,
             ativo_id INT NOT NULL,
+            tipo VARCHAR(100) NOT NULL,
             severidade VARCHAR(20) NOT NULL,
-            descricao VARCHAR(255) NOT NULL,
             criado_em DATETIME NOT NULL,
             FOREIGN KEY (ativo_id) REFERENCES ativos(id)
         )
     """)
 
     ativos = [
-        (1, "Servidor-Web-01", "alta"),
-        (2, "Servidor-DB-01", "alta"),
-        (3, "Notebook-ADM-01", "media"),
+        (
+            1,
+            "SRV-WEB01",
+            "192.168.1.10",
+            "alta"
+        ),
+        (
+            2,
+            "PC-RH03",
+            "192.168.1.45",
+            "baixa"
+        ),
     ]
 
     alertas = [
         (
             1,
             1,
+            "BRUTE_FORCE",
             "critica",
-            "Tentativa de exploração",
             datetime(2026, 9, 1, 10, 0, 0)
         ),
         (
             2,
             1,
+            "PORT_SCAN",
             "alta",
-            "Múltiplas falhas de autenticação",
             datetime(2026, 9, 1, 11, 0, 0)
         ),
         (
             3,
             2,
-            "alta",
-            "Porta administrativa exposta",
-            datetime(2026, 9, 1, 12, 0, 0)
-        ),
-        (
-            4,
-            3,
+            "XSS",
             "media",
-            "Software desatualizado",
-            datetime(2026, 9, 1, 13, 0, 0)
+            datetime(2026, 9, 1, 12, 0, 0)
         ),
     ]
 
     cursor.executemany(
         """
-        INSERT INTO ativos (id, nome, criticidade)
-        VALUES (%s, %s, %s)
+        INSERT INTO ativos
+            (id, nome, ip, criticidade)
+        VALUES
+            (%s, %s, %s, %s)
         """,
         ativos
     )
@@ -98,40 +103,46 @@ def preparar_mysql():
     cursor.executemany(
         """
         INSERT INTO alertas
-            (id, ativo_id, severidade, descricao, criado_em)
-        VALUES (%s, %s, %s, %s, %s)
+            (id, ativo_id, tipo, severidade, criado_em)
+        VALUES
+            (%s, %s, %s, %s, %s)
         """,
         alertas
     )
 
     conn.commit()
 
-    print("[OK] Banco MySQL preparado.")
-
     cursor.close()
     conn.close()
+
+    print("[OK] MySQL preparado.")
 
 
 def extrair_dados_mysql():
     conn = conectar_mysql()
     cursor = conn.cursor(dictionary=True)
 
+    # Os valores continuam separados dos comandos SQL.
+    # O parâmetro permite demonstrar o uso de consulta parametrizada.
     query = """
         SELECT
             al.id AS alerta_id,
             al.ativo_id,
+            al.tipo,
             al.severidade,
-            al.descricao,
             al.criado_em,
             at.nome AS ativo_nome,
+            at.ip AS ativo_ip,
             at.criticidade AS ativo_criticidade
         FROM alertas al
         INNER JOIN ativos at
             ON al.ativo_id = at.id
+        WHERE al.id >= %s
         ORDER BY al.id
     """
 
-    cursor.execute(query)
+    cursor.execute(query, (1,))
+
     resultados = cursor.fetchall()
 
     cursor.close()
@@ -140,18 +151,32 @@ def extrair_dados_mysql():
     return resultados
 
 
+def contar_alertas_mysql():
+    conn = conectar_mysql()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM alertas")
+
+    quantidade = cursor.fetchone()[0]
+
+    cursor.close()
+    conn.close()
+
+    return quantidade
+
+
 def converter_para_mongodb(registros):
     documentos = []
 
     for registro in registros:
         documento = {
             "alerta_id": registro["alerta_id"],
+            "tipo": registro["tipo"],
             "severidade": registro["severidade"],
-            "descricao": registro["descricao"],
             "criado_em": registro["criado_em"],
             "ativo": {
-                "id": registro["ativo_id"],
                 "nome": registro["ativo_nome"],
+                "ip": registro["ativo_ip"],
                 "criticidade": registro["ativo_criticidade"]
             }
         }
@@ -163,15 +188,17 @@ def converter_para_mongodb(registros):
 
 def migrar_para_mongodb(documentos):
     db = conectar_mongo()
+
     colecao = db["alertas"]
 
     colecao.delete_many({})
 
     if documentos:
         resultado = colecao.insert_many(documentos)
+
         print(
-            f"[OK] {len(resultado.inserted_ids)} documentos "
-            "inseridos no MongoDB."
+            f"[OK] {len(resultado.inserted_ids)} "
+            "documentos inseridos no MongoDB."
         )
 
     return colecao
@@ -180,81 +207,101 @@ def migrar_para_mongodb(documentos):
 def comparar_quantidades(total_mysql, colecao):
     total_mongo = colecao.count_documents({})
 
-    print(f"[INFO] Alertas no MySQL: {total_mysql}")
-    print(f"[INFO] Documentos no MongoDB: {total_mongo}")
+    print()
+    print(f"MySQL: {total_mysql} alertas")
+    print(f"MongoDB: {total_mongo} documentos")
 
     if total_mysql == total_mongo:
-        print("[OK] Nenhum alerta foi perdido durante a migração.")
+        print("MIGRAÇÃO ÍNTEGRA")
     else:
-        print("[ERRO] A quantidade de registros não coincide.")
+        print("ERRO: a quantidade de registros não coincide.")
 
     return total_mongo
 
 
-def consultar_ativos_criticidade_alta(colecao):
+def consultar_criticidade_alta(colecao):
     resultados = list(
         colecao.find(
-            {"ativo.criticidade": "alta"},
-            {"_id": 0}
+            {
+                "ativo.criticidade": "alta"
+            },
+            {
+                "_id": 0
+            }
         )
     )
 
-    print("\nAlertas relacionados a ativos de criticidade alta:")
+    print()
+    print(
+        'db.alertas.find({"ativo.criticidade":"alta"})'
+    )
 
-    for alerta in resultados:
-        print(
-            f"- Alerta {alerta['alerta_id']} | "
-            f"Ativo: {alerta['ativo']['nome']} | "
-            f"Severidade: {alerta['severidade']}"
-        )
+    for documento in resultados:
+        print(documento)
 
-    print(f"[INFO] Total encontrado: {len(resultados)}")
+    print(
+        f"Quantidade encontrada: {len(resultados)}"
+    )
 
     return resultados
 
 
 def main():
-    print("=" * 60)
+    print("=" * 70)
     print("EXERCÍCIO 2 — MIGRAÇÃO MYSQL → MONGODB")
-    print("=" * 60)
+    print("=" * 70)
 
     preparar_mysql()
 
     registros = extrair_dados_mysql()
 
-    print(f"[INFO] Registros obtidos pelo JOIN: {len(registros)}")
+    print(
+        f"[INFO] Registros obtidos pelo JOIN: "
+        f"{len(registros)}"
+    )
 
     documentos = converter_para_mongodb(registros)
 
     colecao = migrar_para_mongodb(documentos)
 
+    total_mysql = contar_alertas_mysql()
+
     comparar_quantidades(
-        total_mysql=len(registros),
-        colecao=colecao
+        total_mysql,
+        colecao
     )
 
-    consultar_ativos_criticidade_alta(colecao)
+    resultados_alta = consultar_criticidade_alta(
+        colecao
+    )
 
-    print("\nANÁLISE:")
+    print()
+    print("ANÁLISE:")
     print(
-        "- O modelo relacional utiliza JOIN entre ativos e alertas."
+        "- Ganho: os dados do ativo ficam embutidos no "
+        "documento e a leitura não precisa de JOIN."
     )
     print(
-        "- No MongoDB, os dados do ativo são incorporados "
-        "diretamente ao documento do alerta."
+        "- Perda: existe duplicação dos dados do ativo "
+        "em vários alertas."
     )
     print(
-        "- O embedding evita JOINs durante consultas que precisam "
-        "dos dados do ativo junto ao alerta."
+        "- Se o nome, IP ou criticidade de um ativo mudar, "
+        "pode ser necessário utilizar update_many() "
+        "nos documentos relacionados."
     )
-    print(
-        "- A desvantagem é a duplicação dos dados do ativo caso "
-        "existam muitos alertas para o mesmo ativo."
-    )
-    print(
-        "- A comparação das quantidades confirma que nenhum alerta "
-        "foi perdido durante a migração."
-    )
+
+    if (
+        total_mysql == 3
+        and len(documentos) == 3
+        and colecao.count_documents({}) == 3
+        and len(resultados_alta) == 2
+    ):
+        print()
+        print("[OK] Todos os resultados esperados foram confirmados.")
+    else:
+        print()
+        print("[ERRO] Algum resultado não corresponde ao enunciado.")
 
 
 if __name__ == "__main__":

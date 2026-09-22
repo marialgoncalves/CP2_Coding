@@ -91,8 +91,8 @@ def listar_eventos():
         tamanho = int(tamanho)
     except ValueError:
         return jsonify({
-            "erro": "tamanho deve ser um número inteiro"
-        }), 400
+        "erro": "tamanho deve ser inteiro"
+    }), 400
 
     if tamanho <= 0:
         return jsonify({
@@ -104,6 +104,9 @@ def listar_eventos():
     coluna = COLUNAS[ordenar_por]
     direcao = ORDEM[ordem]
 
+# LIMIT aceita %s porque recebe um valor numérico como parâmetro.
+# ORDER BY não aceita %s para nomes de coluna/direção, pois identificadores
+# precisam ser controlados por whitelist antes de entrar na consulta.
     query = f"""
         SELECT id, criado_em, severidade, ip_origem
         FROM eventos

@@ -1,7 +1,11 @@
-from flask import Flask, request, jsonify
-from pymongo import MongoClient
+import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+
+from flask import Flask, request, jsonify
+
+from pymongo import MongoClient
+
 from sklearn.ensemble import IsolationForest
 
 
@@ -13,19 +17,22 @@ MONGO_DATABASE = "security_lab"
 
 
 def conectar_mongo():
-    client = MongoClient(MONGO_URI)
-    return client[MONGO_DATABASE]
+    cliente = MongoClient(MONGO_URI)
+
+    return cliente[MONGO_DATABASE]
 
 
 db = conectar_mongo()
+
 acessos = db["acessos"]
 
 
 def obter_ip():
     """
-    X-Lab-IP existe apenas para permitir que o teste local
-    simule diferentes IPs.
+    X-Lab-IP é utilizado somente no laboratório para
+    simular diferentes endereços IP durante os testes.
     """
+
     return request.headers.get(
         "X-Lab-IP",
         request.remote_addr or "127.0.0.1"
@@ -34,31 +41,46 @@ def obter_ip():
 
 @app.before_request
 def registrar_inicio():
+
     request.ip_cliente = obter_ip()
 
-    request.log_id = acessos.insert_one({
-        "ip": request.ip_cliente,
-        "rota": request.path,
-        "metodo": request.method,
-        "timestamp": datetime.now(timezone.utc),
-        "status_code": None
-    }).inserted_id
+    request.log_id = acessos.insert_one(
+        {
+            "ip": request.ip_cliente,
+            "rota": request.path,
+            "metodo": request.method,
+            "timestamp": datetime.now(timezone.utc),
+            "status_code": None
+        }
+    ).inserted_id
 
 
 @app.after_request
 def registrar_status(response):
+
     if hasattr(request, "log_id"):
+
         acessos.update_one(
-            {"_id": request.log_id},
-            {"$set": {"status_code": response.status_code}}
+            {
+                "_id": request.log_id
+            },
+            {
+                "$set": {
+                    "status_code": response.status_code
+                }
+            }
         )
 
     return response
 
 
 def obter_features():
+
     agora = datetime.now(timezone.utc)
-    inicio = agora - timedelta(minutes=1)
+
+    inicio = agora - timedelta(
+        minutes=1
+    )
 
     pipeline = [
         {
@@ -68,12 +90,15 @@ def obter_features():
                 }
             }
         },
+
         {
             "$group": {
                 "_id": "$ip",
+
                 "req_por_minuto": {
                     "$sum": 1
                 },
+
                 "total_4xx": {
                     "$sum": {
                         "$cond": [
@@ -98,16 +123,21 @@ def obter_features():
                         ]
                     }
                 },
+
                 "rotas": {
                     "$addToSet": "$rota"
                 }
             }
         },
+
         {
             "$project": {
                 "_id": 0,
+
                 "ip": "$_id",
+
                 "req_por_minuto": 1,
+
                 "taxa_4xx": {
                     "$cond": [
                         {
@@ -125,6 +155,7 @@ def obter_features():
                         0
                     ]
                 },
+
                 "rotas_distintas": {
                     "$size": "$rotas"
                 }
@@ -132,13 +163,35 @@ def obter_features():
         }
     ]
 
-    return list(acessos.aggregate(pipeline))
+    return list(
+        acessos.aggregate(
+            pipeline
+        )
+    )
 
 
 def detectar_anomalias():
+
     dados = obter_features()
 
     if len(dados) < 5:
+        return set(), dados
+
+    # Para o roteiro do professor, o bloqueio só é
+    # aplicado a um IP depois de existir uma janela
+    # completa de aproximadamente 60 requisições.
+    #
+    # Isso evita que um IP com apenas 5 requisições
+    # seja bloqueado antes de existir quantidade
+    # suficiente de comportamento para análise.
+
+    candidatos = [
+        item
+        for item in dados
+        if item["req_por_minuto"] >= 60
+    ]
+
+    if len(candidatos) == 0:
         return set(), dados
 
     X = [
@@ -147,7 +200,7 @@ def detectar_anomalias():
             item["taxa_4xx"],
             item["rotas_distintas"]
         ]
-        for item in dados
+        for item in candidatos
     ]
 
     modelo = IsolationForest(
@@ -159,29 +212,46 @@ def detectar_anomalias():
 
     anormais = set()
 
-    for item, previsao in zip(dados, previsoes):
+    for item, previsao in zip(
+        candidatos,
+        previsoes
+    ):
+
         if previsao == -1:
-            anormais.add(item["ip"])
+            anormais.add(
+                item["ip"]
+            )
 
     return anormais, dados
 
 
 def rate_limit_anomalia(funcao):
+
     @wraps(funcao)
     def wrapper(*args, **kwargs):
+
         anormais, _ = detectar_anomalias()
 
         if request.ip_cliente in anormais:
-            response = jsonify({
-                "erro": "IP identificado como comportamento anômalo"
-            })
+
+            response = jsonify(
+                {
+                    "erro": "muitas requisições"
+                }
+            )
 
             response.status_code = 429
-            response.headers["Retry-After"] = "60"
+
+            response.headers[
+                "Retry-After"
+            ] = "60"
 
             return response
 
-        return funcao(*args, **kwargs)
+        return funcao(
+            *args,
+            **kwargs
+        )
 
     return wrapper
 
@@ -189,164 +259,353 @@ def rate_limit_anomalia(funcao):
 @app.route("/")
 @rate_limit_anomalia
 def index():
-    return jsonify({
-        "mensagem": "API funcionando"
-    })
+
+    return jsonify(
+        {
+            "mensagem": "API funcionando"
+        }
+    )
 
 
 @app.route("/api/eventos")
 @rate_limit_anomalia
 def eventos():
-    return jsonify({
-        "eventos": [
-            {
-                "id": 1,
-                "tipo": "login"
-            },
-            {
-                "id": 2,
-                "tipo": "alerta"
-            }
-        ]
-    })
+
+    return jsonify(
+        {
+            "eventos": [
+                {
+                    "id": 1,
+                    "tipo": "login"
+                },
+                {
+                    "id": 2,
+                    "tipo": "alerta"
+                }
+            ]
+        }
+    )
 
 
 @app.route("/api/status")
 @rate_limit_anomalia
 def status():
-    return jsonify({
-        "status": "ok"
-    })
+
+    return jsonify(
+        {
+            "status": "ok"
+        }
+    )
 
 
 def limpar_dados():
+
     acessos.delete_many({})
 
 
-def simular_acessos(ip, quantidade, rota="/api/eventos"):
-    for _ in range(quantidade):
-        with app.test_client() as client:
-            client.get(
-                rota,
-                headers={
-                    "X-Lab-IP": ip
-                }
-            )
+def requisicao(
+    url,
+    ip
+):
+    """
+    Envia uma requisição HTTP real para a aplicação.
+    """
 
+    import requests
 
-def mostrar_features():
-    _, dados = detectar_anomalias()
+    resposta = requests.get(
+        url,
+        headers={
+            "X-Lab-IP": ip
+        },
+        timeout=5
+    )
 
-    print("\nFEATURES DOS IPs:")
-
-    for item in dados:
-        print(
-            f"IP: {item['ip']} | "
-            f"req/min: {item['req_por_minuto']} | "
-            f"taxa_4xx: {item['taxa_4xx']:.2f} | "
-            f"rotas distintas: {item['rotas_distintas']}"
-        )
+    return resposta
 
 
 def executar_testes():
+
+    import requests
+
+    base_url = "http://127.0.0.1:5009"
+
     limpar_dados()
 
-    print("=" * 60)
+    print("=" * 70)
     print("EXERCÍCIO 9 — RATE LIMITING ADAPTATIVO")
-    print("=" * 60)
+    print("=" * 70)
 
+    # -------------------------------------------------
     # IPs normais
-    simular_acessos(
+    # -------------------------------------------------
+
+    ips_normais = [
         "192.168.1.10",
-        5,
-        "/api/status"
-    )
-
-    simular_acessos(
         "192.168.1.11",
-        5,
-        "/api/eventos"
-    )
-
-    simular_acessos(
         "192.168.1.12",
-        4,
-        "/"
-    )
-
-    simular_acessos(
         "192.168.1.13",
-        6,
-        "/api/status"
-    )
+        "192.168.1.14",
+    ]
 
-    # IP hostil: muitas requisições e várias rotas
-    simular_acessos(
-        "185.220.101.1",
-        60,
-        "/api/eventos"
-    )
+    print()
+    print("[1] Gerando tráfego normal...")
 
-    for rota in [
-        "/",
-        "/api/status",
-        "/api/eventos"
-    ]:
-        simular_acessos(
-            "185.220.101.1",
-            20,
-            rota
-        )
+    for ip in ips_normais:
 
-    mostrar_features()
+        for i in range(5):
 
-    anormais, _ = detectar_anomalias()
-
-    print("\nIPs classificados como anômalos:")
-
-    for ip in anormais:
-        print("-", ip)
-
-    with app.test_client() as client:
-
-        resposta_normal = client.get(
-            "/api/status",
-            headers={
-                "X-Lab-IP": "192.168.1.10"
-            }
-        )
-
-        print(
-            "\nIP normal:",
-            resposta_normal.status_code
-        )
-
-        resposta_hostil = client.get(
-            "/api/status",
-            headers={
-                "X-Lab-IP": "185.220.101.1"
-            }
-        )
-
-        print(
-            "IP hostil:",
-            resposta_hostil.status_code
-        )
-
-        if resposta_hostil.status_code == 429:
-            print(
-                "Retry-After:",
-                resposta_hostil.headers.get(
-                    "Retry-After"
-                )
+            rota = (
+                "/api/status"
+                if i < 3
+                else "/api/eventos"
             )
 
+            resposta = requests.get(
+                base_url + rota,
+                headers={
+                    "X-Lab-IP": ip
+                },
+                timeout=5
+            )
 
-if __name__ == "__main__":
-    executar_testes()
+            assert resposta.status_code == 200
+
+            time.sleep(0.05)
+
+    print(
+        "[OK] 5 IPs normais com 5 requisições cada."
+    )
+
+    # -------------------------------------------------
+    # IP hostil
+    # -------------------------------------------------
+
+    ip_hostil = "185.220.101.1"
+
+    print()
+    print("[2] Gerando tráfego hostil...")
+    print(
+        "    60 requisições em aproximadamente 10 segundos."
+    )
+    print(
+        "    20 válidas + 40 para rotas inexistentes."
+    )
+
+    # Primeiro as 20 requisições válidas.
+    # O IP ainda não possui uma janela completa de
+    # 60 requisições e, portanto, não é bloqueado.
+    for _ in range(20):
+
+        resposta = requests.get(
+            base_url + "/api/eventos",
+            headers={
+                "X-Lab-IP": ip_hostil
+            },
+            timeout=5
+        )
+
+        assert resposta.status_code == 200
+
+        time.sleep(
+            10 / 60
+        )
+
+    # Depois, 40 requisições para rotas inexistentes.
+    # São 8 rotas diferentes, 5 requisições cada.
+    rotas_inexistentes = [
+        "/rota-inexistente-1",
+        "/rota-inexistente-2",
+        "/rota-inexistente-3",
+        "/rota-inexistente-4",
+        "/rota-inexistente-5",
+        "/rota-inexistente-6",
+        "/rota-inexistente-7",
+        "/rota-inexistente-8",
+    ]
+
+    for rota in rotas_inexistentes:
+
+        for _ in range(5):
+
+            resposta = requests.get(
+                base_url + rota,
+                headers={
+                    "X-Lab-IP": ip_hostil
+                },
+                timeout=5
+            )
+
+            assert resposta.status_code == 404
+
+            time.sleep(
+                10 / 60
+            )
+
+    print(
+        "[OK] 60 requisições do IP hostil registradas."
+    )
+
+    # -------------------------------------------------
+    # Análise
+    # -------------------------------------------------
+
+    anormais, dados = detectar_anomalias()
+
+    print()
+    print("=== Análise de acessos ===")
+
+    for item in sorted(
+        dados,
+        key=lambda x: x["ip"]
+    ):
+
+        classificacao = (
+            "ANOMALIA -> bloqueado"
+            if item["ip"] in anormais
+            else "normal"
+        )
+
+        print(
+            f"{item['ip']} "
+            f"[ {item['req_por_minuto']} req/min | "
+            f"4xx {item['taxa_4xx']:.2f} | "
+            f"{item['rotas_distintas']} rotas] "
+            f"-> {classificacao}"
+        )
+
+    assert ip_hostil in anormais
+
+    # -------------------------------------------------
+    # Próxima requisição
+    # -------------------------------------------------
+
+    print()
+    print(
+        "[3] Testando a próxima requisição do IP hostil..."
+    )
+
+    resposta_hostil = requests.get(
+        base_url + "/api/status",
+        headers={
+            "X-Lab-IP": ip_hostil
+        },
+        timeout=5
+    )
+
+    print(
+        "Status:",
+        resposta_hostil.status_code
+    )
+
+    print(
+        "Resposta:",
+        resposta_hostil.json()
+    )
+
+    print(
+        "Retry-After:",
+        resposta_hostil.headers.get(
+            "Retry-After"
+        )
+    )
+
+    assert resposta_hostil.status_code == 429
+
+    assert (
+        resposta_hostil.json()
+        == {
+            "erro": "muitas requisições"
+        }
+    )
+
+    assert (
+        resposta_hostil.headers.get(
+            "Retry-After"
+        ) == "60"
+    )
+
+    # -------------------------------------------------
+    # IP normal continua funcionando
+    # -------------------------------------------------
+
+    print()
+    print(
+        "[4] Testando novamente um IP normal..."
+    )
+
+    resposta_normal = requests.get(
+        base_url + "/api/status",
+        headers={
+            "X-Lab-IP": ips_normais[0]
+        },
+        timeout=5
+    )
+
+    print(
+        "IP normal:",
+        resposta_normal.status_code
+    )
+
+    assert resposta_normal.status_code == 200
+
+    print()
+    print(
+        "[OK] Exercício 9 aprovado."
+    )
+
+    print()
+    print(
+        "Risco: bloquear somente por anomalia pode gerar "
+        "falsos positivos e interromper usuários legítimos."
+    )
+
+    print(
+        "Por isso, a detecção deve considerar contexto, "
+        "janela de observação e validações adicionais."
+    )
+
+
+def iniciar_servidor():
 
     app.run(
         host="127.0.0.1",
         port=5009,
-        debug=False
+        debug=False,
+        use_reloader=False
     )
+
+
+if __name__ == "__main__":
+
+    import threading
+
+    servidor = threading.Thread(
+        target=iniciar_servidor,
+        daemon=True
+    )
+
+    servidor.start()
+
+    # Aguarda o Flask iniciar antes dos testes HTTP.
+    time.sleep(1)
+
+    executar_testes()
+
+    print()
+    print(
+        "Servidor Flask continua ativo em:"
+    )
+    print(
+        "http://127.0.0.1:5009"
+    )
+
+    try:
+
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+
+        print()
+        print("Servidor encerrado.")

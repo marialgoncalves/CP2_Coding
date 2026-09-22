@@ -1,16 +1,38 @@
-# A função recomendar apenas percorre as regras e aplica a primeira
-# que corresponde ao perfil recebido.
+# Exercício 1 — Assistente de decisão de armazenamento
+
 REGRAS = [
     {
         "nome": "dados_transacionais",
-        "quando": lambda p: p["schema_fixo"] and p["precisa_acid"],
+        "quando": lambda p: (
+            p["schema_fixo"]
+            and p["precisa_acid"]
+        ),
         "banco": "MySQL",
         "cap": "CP",
         "justificativa": (
-            "O cenário exige transações ACID e possui estrutura de dados "
-            "estável. O erro inaceitável seria confirmar uma operação "
-            "parcialmente ou utilizar dados inconsistentes para autenticação "
-            "ou controle de uma transação."
+            "O cenário possui estrutura estável e exige transações ACID. "
+            "O erro inaceitável seria autenticar, registrar ou confirmar "
+            "uma operação com dados inconsistentes ou parcialmente gravados."
+        ),
+        "risco_owasp": "A07"
+    },
+    {
+        "nome": "cache_de_sessoes_sensivel",
+        "quando": lambda p: (
+            p["schema_fixo"]
+            and p["escala_horizontal"]
+            and p["tolera_atraso_de_consistencia"]
+            and p["dado_sensivel"]
+            and not p["precisa_acid"]
+        ),
+        "banco": "MongoDB",
+        "cap": "AP",
+        "justificativa": (
+            "O cache de sessões precisa escalar horizontalmente e pode "
+            "tolerar atraso de consistência, mas contém dados sensíveis "
+            "relacionados à sessão. O erro inaceitável seria uma falha de "
+            "autenticação ou perda de disponibilidade causada pela tentativa "
+            "de exigir consistência imediata em todo o cache."
         ),
         "risco_owasp": "A07"
     },
@@ -20,6 +42,7 @@ REGRAS = [
             p["escala_horizontal"]
             and p["tolera_atraso_de_consistencia"]
             and not p["precisa_acid"]
+            and not p["dado_sensivel"]
         ),
         "banco": "MongoDB",
         "cap": "AP",
@@ -53,12 +76,6 @@ REGRAS = [
 def recomendar(perfil):
     """
     Analisa um perfil e retorna uma recomendação de armazenamento.
-
-    Parâmetro:
-        perfil (dict): características do conjunto de dados.
-
-    Retorno:
-        dict com banco, CAP, justificativa e risco OWASP.
     """
 
     campos_obrigatorios = {
@@ -73,7 +90,8 @@ def recomendar(perfil):
 
     if campos_faltantes:
         raise ValueError(
-            f"Perfil incompleto. Campos ausentes: {sorted(campos_faltantes)}"
+            f"Perfil incompleto. Campos ausentes: "
+            f"{sorted(campos_faltantes)}"
         )
 
     for regra in REGRAS:
@@ -167,9 +185,8 @@ esperados = {
     },
 }
 
-#Executa testes simples para validar os cinco cenários.
-def testar_perfis():
 
+def testar_perfis():
     print("=" * 70)
     print("TESTE DO EXERCÍCIO 1")
     print("=" * 70)
@@ -190,6 +207,7 @@ def testar_perfis():
             print(f"[OK] {nome}")
         else:
             todos_passaram = False
+
             print(f"[ERRO] {nome}")
             print(f"      Esperado: {esperado}")
             print(f"      Obtido:   {resultado}")
